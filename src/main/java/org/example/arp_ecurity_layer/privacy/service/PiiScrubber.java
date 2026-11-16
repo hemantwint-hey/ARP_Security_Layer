@@ -30,6 +30,8 @@ public class PiiScrubber {
      * @return ScrubResult with sanitized text and detection metadata
      */
     public ScrubResult scrubFreeText(String rawRemarks) {
+        String text = rawRemarks;
+        List<String> stripped = new ArrayList<>();
         // TODO: Return ScrubResult("", false, "") for null/blank input
         // TODO: Apply EMAIL_PATTERN replacement -> "[REDACTED_EMAIL]", track in strippedFields list
         // TODO: Apply PHONE_PATTERN replacement -> "[REDACTED_PHONE]"
@@ -38,7 +40,28 @@ public class PiiScrubber {
         // TODO: Convert strippedFields list to comma-separated string
         // TODO: Truncate scrubbedText to MAX_LENGTH
         // TODO: Return ScrubResult(scrubbedText, !strippedFields.isEmpty(), fieldsStripped)
-        throw new UnsupportedOperationException("TODO: implement");
+        if(rawRemarks ==  null || rawRemarks.isBlank())return new ScrubResult("",false,"");
+        if(EMAIL_PATTERN.matcher(text).find()){
+            text = EMAIL_PATTERN.matcher(text).replaceAll("[REDACTED_EMAIL]");
+            stripped.add("EMAIL");
+        }
+        if(PHONE_PATTERN.matcher(text).find()){
+            text = PHONE_PATTERN.matcher(text).replaceAll("[REDACTED_PHONE]");
+            stripped.add("PHONE");
+        }
+        if(ACCOUNT_PATTERN.matcher(text).find()){
+            text = ACCOUNT_PATTERN.matcher(text).replaceAll("[REDACTED_ACCOUNT]");
+            stripped.add("ACCOUNT_NO");
+        }
+        if(UPI_PATTERN.matcher(text).find()){
+            text = UPI_PATTERN.matcher(text).replaceAll("[REDACTED_UPI]");
+            stripped.add("UPI_ID");
+        }
+        if(text.length() > MAX_LENGTH){
+            text = text.substring(0,MAX_LENGTH);
+        }
+
+      return new ScrubResult(text.trim(),!stripped.isEmpty(),String.join(",",stripped));
     }
 
     /**
@@ -54,7 +77,12 @@ public class PiiScrubber {
         // TODO: Remove: "print", "reveal", "show", "leak", "dump" followed by sensitive words
         // TODO: Strip control characters (ASCII < 32) and delimiter sequences (---, ===, ###)
         // TODO: Trim and return; preserve at least first 500 chars of legitimate query content
-        throw new UnsupportedOperationException("TODO: implement");
+        if (input == null || input.isBlank()) {
+            return "";
+        }
+        return input.replaceAll("(?i)(ignore|forget|override|reveal|leak|print)\\s+(instructions|prompt|rules|secret|customer)", "[FILTERED]")
+                    .replaceAll("[-=~#*]{3,}", " ")
+                    .trim();
     }
 }
 
