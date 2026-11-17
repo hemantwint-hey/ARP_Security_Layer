@@ -4,6 +4,7 @@ import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.DayOfWeek;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 
@@ -32,7 +33,19 @@ public class DataMinimizer {
         //       EVENING   = 17:00–20:59
         //       NIGHT     = 21:00–05:59 (wrap around midnight)
         // TODO: Return e.g. "WEEKDAY_EVENING", "WEEKEND_MORNING"
-        throw new UnsupportedOperationException("TODO: implement");
+        if (ts == null) ts = LocalDateTime.now();
+        DayOfWeek dow = ts.getDayOfWeek();
+        boolean isWeekend = (dow == DayOfWeek.SATURDAY || dow == DayOfWeek.SUNDAY);
+        String dayType = isWeekend ? "WEEKEND" : "WEEKDAY";
+        int hour = ts.getHour();
+
+        String timeOfDay;
+        if (hour >= 6 && hour < 12) timeOfDay = "MORNING";
+        else if (hour >= 12 && hour < 16) timeOfDay = "AFTERNOON";
+        else if (hour >= 16 && hour < 20) timeOfDay = "EVENING";
+        else timeOfDay = "NIGHT";
+
+        return dayType + "_" + timeOfDay;
     }
 
     /**
@@ -42,12 +55,12 @@ public class DataMinimizer {
      * @return one of: MICRO_0_100 | LOW_100_500 | MEDIUM_500_2500 | HIGH_2500_10000 | VERY_HIGH_10000_PLUS
      */
     public String toAmountBand(BigDecimal amount) {
-        // TODO: MICRO     : 0 <= amount < 100
-        // TODO: LOW       : 100 <= amount < 500
-        // TODO: MEDIUM    : 500 <= amount < 2500
-        // TODO: HIGH      : 2500 <= amount < 10000
-        // TODO: VERY_HIGH : amount >= 10000
-        throw new UnsupportedOperationException("TODO: implement");
+        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) return "ZERO";
+        else if (amount.compareTo(BigDecimal.valueOf(100)) < 0) return "MICRO_0_100";
+        else if (amount.compareTo(BigDecimal.valueOf(500)) < 0) return "LOW_100_500";
+        else if (amount.compareTo(BigDecimal.valueOf(2500)) < 0) return "MEDIUM_500_2500";
+        else if (amount.compareTo(BigDecimal.valueOf(10000)) < 0) return "HIGH_2500_10000";
+        else return "VERY_HIGH_10000_PLUS";
     }
 
     /**
@@ -61,10 +74,13 @@ public class DataMinimizer {
      */
     public BigDecimal toMinimizedAmount(BigDecimal amount, String privacyMode) {
         // TODO: If STRICT, return null
+        if("STRICT".equalsIgnoreCase(privacyMode))return null;
         // TODO: If BALANCED, round to nearest 500:
         //       e.g. 1499 -> 1500, 1250 -> 1500, 2300 -> 2500, 400 -> 500
         //       Use: amount.divide(BigDecimal.valueOf(500), 0, RoundingMode.HALF_UP).multiply(BigDecimal.valueOf(500))
-        throw new UnsupportedOperationException("TODO: implement");
+        if(amount == null)return BigDecimal.ZERO;
+        BigDecimal step = BigDecimal.valueOf(500);
+        return amount.divide(step, 0, RoundingMode.HALF_UP).multiply(step);
     }
 
     /**
@@ -75,7 +91,8 @@ public class DataMinimizer {
      */
     public String toPeriodKey(LocalDateTime ts) {
         // TODO: return ts.format(PERIOD_FORMATTER)
-        throw new UnsupportedOperationException("TODO: implement");
+       if(ts == null)ts = LocalDateTime.now();
+       return ts.format(PERIOD_FORMATTER);
     }
 }
 

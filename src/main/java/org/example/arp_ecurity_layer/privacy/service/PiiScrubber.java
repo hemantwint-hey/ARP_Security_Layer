@@ -30,38 +30,35 @@ public class PiiScrubber {
      * @return ScrubResult with sanitized text and detection metadata
      */
     public ScrubResult scrubFreeText(String rawRemarks) {
+        if (rawRemarks == null || rawRemarks.isBlank()) {
+            return new ScrubResult("", false, "");
+        }
+
         String text = rawRemarks;
         List<String> stripped = new ArrayList<>();
-        // TODO: Return ScrubResult("", false, "") for null/blank input
-        // TODO: Apply EMAIL_PATTERN replacement -> "[REDACTED_EMAIL]", track in strippedFields list
-        // TODO: Apply PHONE_PATTERN replacement -> "[REDACTED_PHONE]"
-        // TODO: Apply ACCOUNT_PATTERN replacement -> "[REDACTED_ACCOUNT]"
-        // TODO: Apply UPI_PATTERN replacement -> "[REDACTED_UPI]"
-        // TODO: Convert strippedFields list to comma-separated string
-        // TODO: Truncate scrubbedText to MAX_LENGTH
-        // TODO: Return ScrubResult(scrubbedText, !strippedFields.isEmpty(), fieldsStripped)
-        if(rawRemarks ==  null || rawRemarks.isBlank())return new ScrubResult("",false,"");
-        if(EMAIL_PATTERN.matcher(text).find()){
+
+        if (EMAIL_PATTERN.matcher(text).find()) {
             text = EMAIL_PATTERN.matcher(text).replaceAll("[REDACTED_EMAIL]");
             stripped.add("EMAIL");
         }
-        if(PHONE_PATTERN.matcher(text).find()){
+        if (PHONE_PATTERN.matcher(text).find()) {
             text = PHONE_PATTERN.matcher(text).replaceAll("[REDACTED_PHONE]");
             stripped.add("PHONE");
         }
-        if(ACCOUNT_PATTERN.matcher(text).find()){
+        if (ACCOUNT_PATTERN.matcher(text).find()) {
             text = ACCOUNT_PATTERN.matcher(text).replaceAll("[REDACTED_ACCOUNT]");
             stripped.add("ACCOUNT_NO");
         }
-        if(UPI_PATTERN.matcher(text).find()){
+        if (UPI_PATTERN.matcher(text).find()) {
             text = UPI_PATTERN.matcher(text).replaceAll("[REDACTED_UPI]");
             stripped.add("UPI_ID");
         }
-        if(text.length() > MAX_LENGTH){
-            text = text.substring(0,MAX_LENGTH);
+
+        if (text.length() > MAX_LENGTH) {
+            text = text.substring(0, MAX_LENGTH);
         }
 
-      return new ScrubResult(text.trim(),!stripped.isEmpty(),String.join(",",stripped));
+        return new ScrubResult(text.trim(), !stripped.isEmpty(), String.join(",", stripped));
     }
 
     /**
@@ -73,16 +70,44 @@ public class PiiScrubber {
      * @return sanitized string safe for LLM context
      */
     public String stripPromptInjection(String input) {
-        // TODO: Remove/replace phrases: "ignore", "forget", "disregard", "override instructions"
-        // TODO: Remove: "print", "reveal", "show", "leak", "dump" followed by sensitive words
-        // TODO: Strip control characters (ASCII < 32) and delimiter sequences (---, ===, ###)
-        // TODO: Trim and return; preserve at least first 500 chars of legitimate query content
-        if (input == null || input.isBlank()) {
-            return "";
-        }
-        return input.replaceAll("(?i)(ignore|forget|override|reveal|leak|print)\\s+(instructions|prompt|rules|secret|customer)", "[FILTERED]")
-                    .replaceAll("[-=~#*]{3,}", " ")
-                    .trim();
+    if (input == null || input.isBlank()) {
+        return "";
     }
+
+    // Convert to lowercase to handle the "(?i)" case-insensitivity part
+    String sanitized = input.toLowerCase();
+
+    // 1. Strip malicious phrases
+    String[] verbs = {"ignore", "forget", "override", "reveal", "leak", "print"};
+    String[] nouns = {"instructions", "prompt", "context", "previous", "system"};
+
+    for (String verb : verbs) {
+        for (String noun : nouns) {
+            // Recreate the target phrase
+            String badPhrase = verb + " " + noun;
+            
+            // Keep replacing until it's completely gone from the string
+            while (sanitized.contains(badPhrase)) {
+                sanitized = sanitized.replace(badPhrase, " ");
+            }
+        }
+    }
+
+    // 2. Strip repeating delimiters (3 or more)
+    String[] delimiters = {"---", "===", "~~~", "###", "***"};
+    for (String delimiter : delimiters) {
+        while (sanitized.contains(delimiter)) {
+            sanitized = sanitized.replace(delimiter, " ");
+        }
+    }
+
+    // 3. Clean up any weird double spaces we accidentally
+    //  created
+    while (sanitized.contains("  ")) {
+        sanitized = sanitized.replace("  ", " ");
+    }
+
+    return sanitized.trim();
+}
 }
 
