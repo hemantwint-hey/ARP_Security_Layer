@@ -3,13 +3,18 @@ package org.example.arp_ecurity_layer.privacy.service;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.arp_ecurity_layer.crypto.AesGcmEncryptor;
+import org.example.arp_ecurity_layer.kafka.GatewayKafkaProducer;
 import org.example.arp_ecurity_layer.privacy.entity.ArpIdentityMapping;
+import org.example.arp_ecurity_layer.privacy.entity.PrivacyAuditLog;
 import org.example.arp_ecurity_layer.privacy.repository.ArpIdentityMappingRepository;
 import org.example.arp_ecurity_layer.privacy.repository.PrivacyAuditLogRepository;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.security.SecureRandom;
+import java.time.Duration;
+import java.time.LocalDateTime;
 import java.util.Optional;
 
 @Service
@@ -21,9 +26,12 @@ public class ArpTokenResolverService {
     private final PrivacyAuditLogRepository auditLogRepo;
     private final StringRedisTemplate redisTemplate;
     private final AesGcmEncryptor aesEncryptor;
+    private final GatewayKafkaProducer producer;
+    private static final String ARP_FORWARD_PREFIX = "arp:map:";     // customerId -> arpToken
+    private static final String ARP_REVERSE_PREFIX = "arp:resolve:"; // arpToken -> customerId
+    private static final Duration CACHE_TTL        = Duration.ofHours(24);
+    private static final SecureRandom RANDOM       = new SecureRandom();// arpToken -> customerId
 
-    private static final String ARP_FORWARD_PREFIX  = "arp:map:";      // customerId -> arpToken
-    private static final String ARP_REVERSE_PREFIX  = "arp:resolve:";  // arpToken -> customerId
 
     /**
      * Returns existing ACTIVE arpToken for customer, or mints a new one.
@@ -45,7 +53,51 @@ public class ArpTokenResolverService {
         // TODO: 8. Cache in Redis both forward (arp:map:{customerId}) and reverse (arp:resolve:{token})
         // TODO: 9. Persist PrivacyAuditLog (action=TOKEN_MINTED)
         // TODO: 10. Return Optional.of(newToken)
-        throw new UnsupportedOperationException("TODO: implement");
+        String forwardKey = ARP_FORWARD_PREFIX + customerId;
+        String cachedToken = redisTemplate.opsForValue().get(forwardKey);
+        if(cachedToken != null){
+            return Optional.of(cachedToken);
+        }
+        Optional<ArpIdentityMapping> existing  = mappingRepo.findByCustomerIdAndStatus(customerId, "ACTIVE");
+        if(existing.isPresent()){
+            ArpIdentityMapping mapping = existing.get();
+            if(!mapping.isConsentEnabled()){
+                return Optional.empty();
+            }
+            cachedToken(customerId,mapping.getArpToken());
+            return Optional.of(mapping.getArpToken());
+        }
+        String newToken = mintToken();
+        ArpIdentityMapping mapping = ArpIdentityMapping.builder()
+                .customerId(customerId)
+                .userId(userId)
+                .arpToken(newToken)
+                .privacyMode("BALANCED")
+                .consentEnabled(true)
+                .saltVersion(1)
+                .status("ACTIVE")
+                .expiresAt(LocalDateTime.now().plusDays(90))
+                .createdAt(LocalDateTime.now())
+                .build();
+        mappingRepo.save(mapping);
+
+        auditLogRepo.save(PrivacyAuditLog.builder()
+                .customerId(customerId)
+                .arpToken(newToken)
+                .auditAction("TOKEN_MINTED")
+                .fieldsStripped("customerId, userId, email")
+                .createdAt(LocalDateTime.now())
+                .build()
+        );
+        cachedToken(customerId, newToken);
+        log.info("Minted new token {} for customer {} ", newToken,customerId);
+        return Optional.of(newToken);
+    }
+
+    private String mintToken() {
+    }
+
+    private void cachedToken(Long customerId, String arpToken) {
     }
 
     /**
@@ -62,7 +114,12 @@ public class ArpTokenResolverService {
         // TODO: 3. If not cached, query mappingRepo.findByArpTokenAndStatus(arpToken, "ACTIVE")
         // TODO: 4. If found, cache in Redis (TTL 1h), return Optional.of(customerId)
         // TODO: 5. If not found, return Optional.empty() (token rotated or revoked)
-        throw new UnsupportedOperationException("TODO: implement");
+        String reverseKey =  ARP_REVERSE_PREFIX + arpToken;
+        String cachedCusId =  redisTemplate.opsForValue().get(reverseKey);
+        if(cachedCusId != null) return Optional.of(Long.parseLong(cachedCusId));
+        return mappingRepo.findByArpTokenAndStatus(arpToken, "ACTIVE").map(m -> {
+            redisTemplate.opsForValue().set(reverseKey, m.getCustomerId().toString(),Duration.of());
+        })
     }
 
     /**
