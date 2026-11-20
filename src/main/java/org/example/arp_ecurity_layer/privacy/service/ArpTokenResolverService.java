@@ -2,6 +2,7 @@ package org.example.arp_ecurity_layer.privacy.service;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.example.arp_ecurity_layer.contracts.ArpIdentityRevokedEvent;
 import org.example.arp_ecurity_layer.crypto.AesGcmEncryptor;
 import org.example.arp_ecurity_layer.kafka.GatewayKafkaProducer;
 import org.example.arp_ecurity_layer.privacy.entity.ArpIdentityMapping;
@@ -16,6 +17,7 @@ import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.Optional;
+import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
@@ -27,11 +29,11 @@ public class ArpTokenResolverService {
     private final StringRedisTemplate redisTemplate;
     private final AesGcmEncryptor aesEncryptor;
     private final GatewayKafkaProducer producer;
+
     private static final String ARP_FORWARD_PREFIX = "arp:map:";     // customerId -> arpToken
     private static final String ARP_REVERSE_PREFIX = "arp:resolve:"; // arpToken -> customerId
     private static final Duration CACHE_TTL        = Duration.ofHours(24);
-    private static final SecureRandom RANDOM       = new SecureRandom();// arpToken -> customerId
-
+    private static final SecureRandom RANDOM       = new SecureRandom();
 
     /**
      * Returns existing ACTIVE arpToken for customer, or mints a new one.
@@ -43,30 +45,23 @@ public class ArpTokenResolverService {
      */
     @Transactional
     public Optional<String> getOrCreateActiveToken(Long customerId, String userId) {
-        // TODO: 1. Check Redis: GET arp:map:{customerId}
-        // TODO: 2. If cached, return Optional.of(cachedToken)
-        // TODO: 3. If not cached, query mappingRepo.findByCustomerIdAndStatus(customerId, "ACTIVE")
-        // TODO: 4. If mapping found and consentEnabled=false, return Optional.empty()
-        // TODO: 5. If mapping found and consentEnabled=true, cache in Redis (TTL 24h), return token
-        // TODO: 6. If no mapping, mint new token: "R" + SecureRandom 3-digit + "-" + 8 hex chars
-        // TODO: 7. Persist ArpIdentityMapping (status=ACTIVE, privacyMode=BALANCED, expiresAt=now+90days)
-        // TODO: 8. Cache in Redis both forward (arp:map:{customerId}) and reverse (arp:resolve:{token})
-        // TODO: 9. Persist PrivacyAuditLog (action=TOKEN_MINTED)
-        // TODO: 10. Return Optional.of(newToken)
         String forwardKey = ARP_FORWARD_PREFIX + customerId;
         String cachedToken = redisTemplate.opsForValue().get(forwardKey);
-        if(cachedToken != null){
+        if (cachedToken != null) {
             return Optional.of(cachedToken);
         }
-        Optional<ArpIdentityMapping> existing  = mappingRepo.findByCustomerIdAndStatus(customerId, "ACTIVE");
-        if(existing.isPresent()){
+
+        Optional<ArpIdentityMapping> existing = mappingRepo.findByCustomerIdAndStatus(customerId, "ACTIVE");
+        if (existing.isPresent()) {
             ArpIdentityMapping mapping = existing.get();
-            if(!mapping.isConsentEnabled()){
+            if (!mapping.isConsentEnabled()) {
+                log.info("Consent disabled for customer {}", customerId);
                 return Optional.empty();
             }
-            cachedToken(customerId,mapping.getArpToken());
+            cacheToken(customerId, mapping.getArpToken());
             return Optional.of(mapping.getArpToken());
         }
+
         String newToken = mintToken();
         ArpIdentityMapping mapping = ArpIdentityMapping.builder()
                 .customerId(customerId)
@@ -85,19 +80,14 @@ public class ArpTokenResolverService {
                 .customerId(customerId)
                 .arpToken(newToken)
                 .auditAction("TOKEN_MINTED")
-                .fieldsStripped("customerId, userId, email")
+                .fieldsStripped("customerId,userId,email")
                 .createdAt(LocalDateTime.now())
                 .build()
         );
-        cachedToken(customerId, newToken);
-        log.info("Minted new token {} for customer {} ", newToken,customerId);
+
+        cacheToken(customerId, newToken);
+        log.info("Minted new token {} for customer {}", newToken, customerId);
         return Optional.of(newToken);
-    }
-
-    private String mintToken() {
-    }
-
-    private void cachedToken(Long customerId, String arpToken) {
     }
 
     /**
@@ -109,17 +99,16 @@ public class ArpTokenResolverService {
      */
     @Transactional(readOnly = true)
     public Optional<Long> resolveCustomerId(String arpToken) {
-        // TODO: 1. Check Redis: GET arp:resolve:{arpToken}
-        // TODO: 2. If cached, return Optional.of(Long.parseLong(cached))
-        // TODO: 3. If not cached, query mappingRepo.findByArpTokenAndStatus(arpToken, "ACTIVE")
-        // TODO: 4. If found, cache in Redis (TTL 1h), return Optional.of(customerId)
-        // TODO: 5. If not found, return Optional.empty() (token rotated or revoked)
-        String reverseKey =  ARP_REVERSE_PREFIX + arpToken;
-        String cachedCusId =  redisTemplate.opsForValue().get(reverseKey);
-        if(cachedCusId != null) return Optional.of(Long.parseLong(cachedCusId));
+        String reverseKey = ARP_REVERSE_PREFIX + arpToken;
+        String cachedCustId = redisTemplate.opsForValue().get(reverseKey);
+        if (cachedCustId != null) {
+            return Optional.of(Long.parseLong(cachedCustId));
+        }
+
         return mappingRepo.findByArpTokenAndStatus(arpToken, "ACTIVE").map(m -> {
-            redisTemplate.opsForValue().set(reverseKey, m.getCustomerId().toString(),Duration.of());
-        })
+            redisTemplate.opsForValue().set(reverseKey, m.getCustomerId().toString(), Duration.ofHours(1));
+            return m.getCustomerId();
+        });
     }
 
     /**
@@ -131,14 +120,38 @@ public class ArpTokenResolverService {
      */
     @Transactional
     public String rotateToken(Long customerId) {
-        // TODO: 1. Find current ACTIVE mapping for customerId
-        // TODO: 2. Set status=ROTATED on old mapping, persist
-        // TODO: 3. Evict arp:map:{customerId} and arp:resolve:{oldToken} from Redis
-        // TODO: 4. Mint new token and persist new ArpIdentityMapping (status=ACTIVE)
-        // TODO: 5. Cache new token in Redis
-        // TODO: 6. Persist PrivacyAuditLog (action=ROTATED)
-        // TODO: 7. Return new arpToken
-        throw new UnsupportedOperationException("TODO: implement");
+        mappingRepo.findByCustomerIdAndStatus(customerId, "ACTIVE").ifPresent(m -> {
+            m.setStatus("ROTATED");
+            m.setRevokedAt(LocalDateTime.now());
+            mappingRepo.save(m);
+            evictCache(customerId, m.getArpToken());
+        });
+
+        String newToken = mintToken();
+        ArpIdentityMapping mapping = ArpIdentityMapping.builder()
+                .customerId(customerId)
+                .userId("ROTATED")
+                .arpToken(newToken)
+                .privacyMode("BALANCED")
+                .consentEnabled(true)
+                .saltVersion(1)
+                .status("ACTIVE")
+                .expiresAt(LocalDateTime.now().plusDays(90))
+                .createdAt(LocalDateTime.now())
+                .build();
+        mappingRepo.save(mapping);
+        cacheToken(customerId, newToken);
+
+        auditLogRepo.save(PrivacyAuditLog.builder()
+                .customerId(customerId)
+                .arpToken(newToken)
+                .auditAction("ROTATED")
+                .fieldsStripped("all")
+                .createdAt(LocalDateTime.now())
+                .build());
+
+        log.info("Rotated ARP token for customer {}: new token is {}", customerId, newToken);
+        return newToken;
     }
 
     /**
@@ -150,15 +163,47 @@ public class ArpTokenResolverService {
      */
     @Transactional
     public void revokeAndForget(Long customerId) {
-        // TODO: 1. Find ACTIVE mapping for customerId
-        // TODO: 2. Set status=REVOKED, revokedAt=now, persist
-        // TODO: 3. Evict arp:map:{customerId} from Redis
-        // TODO: 4. Evict arp:resolve:{arpToken} from Redis
-        // TODO: 5. Evict guard:policy:{customerId} from Redis
-        // TODO: 6. Build ArpIdentityRevokedEvent (reason=USER_REVOKED_CONSENT)
-        // TODO: 7. Publish tombstone to arp.identity.revoked topic via GatewayKafkaProducer
-        // TODO: 8. Persist PrivacyAuditLog (action=REVOKED)
-        throw new UnsupportedOperationException("TODO: implement");
+        mappingRepo.findByCustomerIdAndStatus(customerId, "ACTIVE").ifPresent(m -> {
+            m.setStatus("REVOKED");
+            m.setRevokedAt(LocalDateTime.now());
+            mappingRepo.save(m);
+
+            evictCache(customerId, m.getArpToken());
+            redisTemplate.delete("guard:policy:" + customerId);
+
+            producer.publishIdentityRevoked(ArpIdentityRevokedEvent.builder()
+                    .eventId(UUID.randomUUID().toString())
+                    .arpToken(m.getArpToken())
+                    .reason("USER_REVOKED_CONSENT")
+                    .revokedAt(LocalDateTime.now())
+                    .build());
+
+            auditLogRepo.save(PrivacyAuditLog.builder()
+                    .customerId(customerId)
+                    .arpToken(m.getArpToken())
+                    .auditAction("REVOKED")
+                    .fieldsStripped("ALL_DATA_PURGED")
+                    .createdAt(LocalDateTime.now())
+                    .build());
+
+            log.warn("Revoked and purged ARP identity for customer {}", customerId);
+        });
+    }
+
+    private String mintToken() {
+        int prefix = 100 + RANDOM.nextInt(900); // 100-999
+        int hex1 = RANDOM.nextInt(0x10000);
+        int hex2 = RANDOM.nextInt(0x10000);
+        return String.format("R%d-%04x%04x", prefix, hex1, hex2);
+    }
+
+    private void cacheToken(Long customerId, String arpToken) {
+        redisTemplate.opsForValue().set(ARP_FORWARD_PREFIX + customerId, arpToken, CACHE_TTL);
+        redisTemplate.opsForValue().set(ARP_REVERSE_PREFIX + arpToken, customerId.toString(), CACHE_TTL);
+    }
+
+    private void evictCache(Long customerId, String arpToken) {
+        redisTemplate.delete(ARP_FORWARD_PREFIX + customerId);
+        redisTemplate.delete(ARP_REVERSE_PREFIX + arpToken);
     }
 }
-

@@ -28,7 +28,16 @@ public class GatewayKafkaProducer {
         // TODO: kafkaTemplate.send(KafkaTopics.ARP_SANITIZED_TRANSACTION, event.getArpToken(), json)
         // TODO: Log: "Published sanitized event {} for arpToken {}"
         // TODO: Catch JsonProcessingException and wrap in RuntimeException
-        throw new UnsupportedOperationException("TODO: implement");
+        try{
+            String json = objectMapper.writeValueAsString(event);
+            kafkaTemplate.send(KafkaTopics.ARP_SANITIZED_TRANSACTION,event.getArpToken(),json);
+            log.info("Published sanitized transaction event {} for token {}",event.getEventId(),event);
+        }
+        catch(Exception e){
+            log.error("Failed to serialize and publisj sanitized error");
+            throw new RuntimeException("Kafka publish  failed", e);
+        }
+
     }
 
     /**
@@ -42,7 +51,16 @@ public class GatewayKafkaProducer {
         // TODO: Serialize event to JSON string
         // TODO: kafkaTemplate.send(KafkaTopics.ARP_IDENTITY_REVOKED, event.getArpToken(), json)
         // TODO: Log: "Published identity revocation tombstone for arpToken {}"
-        throw new UnsupportedOperationException("TODO: implement");
+        try{
+            String json = objectMapper.writeValueAsString(event);
+            kafkaTemplate.send(KafkaTopics.ARP_IDENTITY_REVOKED, event.getArpToken(),json);
+            log.warn("Published identity revocation tombstone for token {}", event.getArpToken());
+        }
+        catch (Exception obj){
+            log.error("Failed to publish identity revocation event", obj);
+            throw new RuntimeException("Kafka published failed", obj);
+        }
+
     }
 }
 

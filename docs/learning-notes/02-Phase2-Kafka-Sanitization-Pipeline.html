@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Phase 2 Reference Guide: Kafka Ingestion & Data Sanitization Pipeline</title>
+<style>
+    @page {
+        size: A4;
+        margin: 18mm 16mm 18mm 16mm;
+        @bottom-right {
+            content: "Page " counter(page) " of " counter(pages);
+            font-size: 9pt;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            color: #64748b;
+        }
+    }
+    body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        line-height: 1.6;
+        color: #0f172a;
+        background: #ffffff;
+        font-size: 10pt;
+    }
+    h1 {
+        font-size: 20pt;
+        color: #1e293b;
+        border-bottom: 3px solid #2563eb;
+        padding-bottom: 8px;
+        margin-bottom: 14px;
+    }
+    h2 {
+        font-size: 14pt;
+        color: #1e3a8a;
+        margin-top: 20px;
+        border-bottom: 1px solid #cbd5e1;
+        padding-bottom: 4px;
+        page-break-after: avoid;
+    }
+    h3 {
+        font-size: 11.5pt;
+        color: #0369a1;
+        margin-top: 14px;
+        page-break-after: avoid;
+    }
+    .badge {
+        display: inline-block;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-size: 8.5pt;
+        font-weight: 600;
+        background: #dbeafe;
+        color: #1e40af;
+        margin-right: 6px;
+    }
+    .badge-core { background: #dcfce7; color: #166534; }
+    .badge-warn { background: #fef3c7; color: #92400e; }
+    .box {
+        background: #f8fafc;
+        border-left: 4px solid #2563eb;
+        padding: 12px 14px;
+        margin: 14px 0;
+        border-radius: 0 6px 6px 0;
+        font-size: 9.5pt;
+    }
+    .box-concept {
+        background: #f0fdf4;
+        border-left: 4px solid #16a34a;
+    }
+    .box-warn {
+        background: #fffbeb;
+        border-left: 4px solid #f59e0b;
+    }
+    pre {
+        background: #0f172a;
+        color: #f8fafc;
+        padding: 12px;
+        border-radius: 6px;
+        font-size: 8.5pt;
+        overflow-x: auto;
+        font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
+        line-height: 1.45;
+        page-break-inside: avoid;
+    }
+    code {
+        font-family: "Cascadia Code", "Consolas", monospace;
+        font-size: 8.5pt;
+        background: #f1f5f9;
+        color: #0f172a;
+        padding: 2px 4px;
+        border-radius: 3px;
+    }
+    pre code {
+        background: transparent;
+        color: inherit;
+        padding: 0;
+    }
+    table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 14px 0;
+        font-size: 9pt;
+    }
+    th, td {
+        border: 1px solid #cbd5e1;
+        padding: 8px 10px;
+        text-align: left;
+    }
+    th {
+        background: #f1f5f9;
+        font-weight: 600;
+        color: #334155;
+    }
+    tr:nth-child(even) { background: #f8fafc; }
+    .diagram {
+        background: #f8fafc;
+        border: 1px dashed #94a3b8;
+        padding: 12px;
+        margin: 14px 0;
+        font-family: monospace;
+        font-size: 9pt;
+        line-height: 1.35;
+        white-space: pre;
+        border-radius: 6px;
+    }
+</style>
+</head>
+<body>
+
+<h1>Phase 2 Reference Guide: Kafka Ingestion & Data Sanitization Pipeline</h1>
+<p>
+    <span class="badge badge-core">Phase: 2 of 6</span>
+    <span class="badge badge-info">Service: ARP_ecurity_Layer (:8082)</span>
+    <span class="badge badge-warn">Event-Driven Security Pipeline</span>
+</p>
+
+<div class="box box-concept">
+    <strong>🎯 Phase 2 Objective:</strong><br>
+    In Phase 1, you built the individual privacy engines (<code>PiiScrubber</code>, <code>DataMinimizer</code>, <code>AesGcmEncryptor</code>, <code>HmacClusterHasher</code>, and <code>ArpTokenResolverService</code>).<br>
+    <strong>In Phase 2, we connect them into a live, real-time Kafka event streaming pipeline!</strong><br>
+    Whenever a transaction occurs in the Banking Monolith (:8080), our Gateway consumes it, enforces idempotency, sanitizes all PII, and publishes a clean event to <code>arp.sanitized.transaction</code> for the AI.
+</div>
+
+<h2>1. Mental Model & Architecture Flow</h2>
+
+<div class="diagram">
++-------------------------------------------------------------------------------------------------+
+| BANKING MONOLITH (:8080)                                                                        |
+| User transfers funds -> TransactionServiceImpl saves debit in MySQL                            |
+| Produces to topic: "transaction.completed"                                                      |
+|   Payload: { eventId, customerId: 123, email: "user@bank.com", amount: 1499.00, remarks: "..." } |
++-----------------------------------------------+-------------------------------------------------+
+                                                |
+                                                v [Kafka Event]
++-------------------------------------------------------------------------------------------------+
+| ARP PRIVACY GATEWAY (:8082) -- RawTransactionEventListener                                      |
+|                                                                                                 |
+|  [Step 1] Idempotency Guard  --> Checks: gateway_processed_events.exists(eventId)? Skip if dupe |
+|  [Step 2] Identity Vault     --> ArpTokenResolverService.getOrCreateActiveToken(123)            |
+|                                  Returns: "R789-9a4f" (or empty if user opted out)              |
+|  [Step 3] Scrub & Minimize   --> PiiScrubber.scrubFreeText(remarks) -> [REDACTED_PHONE]         |
+|                              --> DataMinimizer.toTimeBucket() -> "WEEKDAY_NIGHT"                |
+|                              --> DataMinimizer.toMinimizedAmount() -> 1500.00                   |
+|                              --> HmacClusterHasher.hash() -> "91cd0a4f..."                      |
+|  [Step 4] Build Event        --> Builds SanitizedTransactionEvent (ZERO PII!)                   |
+|  [Step 5] Audit & Idempotent --> Saves GatewayProcessedEvent & PrivacyAuditLog in MySQL         |
++-----------------------------------------------+-------------------------------------------------+
+                                                |
+                                                v [Producer: GatewayKafkaProducer]
++-------------------------------------------------------------------------------------------------+
+| KAFKA TOPIC: "arp.sanitized.transaction"                                                        |
+|   Key: "R789-9a4f"                                                                              |
+|   Payload: { arpToken: "R789-9a4f", amountBand: "MEDIUM_500_2500", minimizedAmount: 1500.00 }   |
+|   --> Ready for consumption by Spring AI Microservice (:8083) in Phase 3!                       |
++-------------------------------------------------------------------------------------------------+
+</div>
+
+<h2>2. Core Concepts You Must Master in Phase 2</h2>
+
+<table>
+    <thead>
+        <tr>
+            <th>Concept</th>
+            <th>How It Works</th>
+            <th>Why We Use It</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><strong>Consumer Idempotency Guard</strong></td>
+            <td>Checking <code>gateway_processed_events</code> table before processing an <code>eventId</code>.</td>
+            <td>Kafka guarantees <em>at-least-once</em> delivery. In case of network retry, idempotency prevents processing or anonymizing the same transaction twice.</td>
+        </tr>
+        <tr>
+            <td><strong>@RetryableTopic + DLT</strong></td>
+            <td>Retries failed messages up to 4 times with exponential backoff (1s &rarr; 2s &rarr; 4s). Poison pills go to <code>.DLT</code>.</td>
+            <td>Prevents a transient database hiccup from losing bank events, while isolating bad payloads from blocking the queue.</td>
+        </tr>
+        <tr>
+            <td><strong>Kafka Partition Key (arpToken)</strong></td>
+            <td>Setting <code>key = event.getArpToken()</code> when publishing to Kafka.</td>
+            <td>Guarantees that all events for the same anonymous customer arrive at the AI service in <strong>strict sequential order</strong>.</td>
+        </tr>
+        <tr>
+            <td><strong>Non-Reversible Source Event Hash</strong></td>
+            <td>Hashing the original banking <code>eventId</code> using SHA-256 before putting it in the sanitized event.</td>
+            <td>Allows deduplication in the AI service without letting anyone reverse-engineer the original bank transaction ID.</td>
+        </tr>
+    </tbody>
+</table>
+
+<h2>3. Files to Implement in Phase 2</h2>
+
+<h3>File 1: <code>kafka/GatewayKafkaProducer.java</code></h3>
+<p><strong>Goal:</strong> Publishes zero-PII sanitized events and identity revocation tombstones to Kafka.</p>
+
+<pre><code>package org.example.arp_ecurity_layer.kafka;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.example.arp_ecurity_layer.contracts.ArpIdentityRevokedEvent;
+import org.example.arp_ecurity_layer.contracts.KafkaTopics;
+import org.example.arp_ecurity_layer.contracts.SanitizedTransactionEvent;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.stereotype.Component;
+import tools.jackson.databind.ObjectMapper;
+
+@Component
+@RequiredArgsConstructor
+@Slf4j
+public class GatewayKafkaProducer {
+
+    private final KafkaTemplate&lt;String, String&gt; kafkaTemplate;
+    private final ObjectMapper objectMapper;
+
+    /**
+     * Publishes zero-PII sanitized transaction event to Spring AI service.
+     * Partition key = arpToken (guarantees ordering per customer token).
+     */
+    public void publishSanitizedTransaction(SanitizedTransactionEvent event) {
+        try {
+            String json = objectMapper.writeValueAsString(event);
+            kafkaTemplate.send(KafkaTopics.ARP_SANITIZED_TRANSACTION, event.getArpToken(), json);
+            log.info("Published sanitized transaction event {} for token {}", event.getEventId(), event.getArpToken());
+        } catch (Exception e) {
+            log.error("Failed to serialize and publish sanitized transaction", e);
+            throw new RuntimeException("Kafka publish failed", e);
+        }
+    }
+
+    /**
+     * Publishes identity revocation tombstone (Right-to-Erasure).
+     */
+    public void publishIdentityRevoked(ArpIdentityRevokedEvent event) {
+        try {
+            String json = objectMapper.writeValueAsString(event);
+            kafkaTemplate.send(KafkaTopics.ARP_IDENTITY_REVOKED, event.getArpToken(), json);
+            log.warn("Published identity revocation tombstone for token {}", event.getArpToken());
+        } catch (Exception e) {
+            log.error("Failed to publish identity revocation event", e);
+            throw new RuntimeException("Kafka revocation publish failed", e);
+        }
+    }
+}
+</code></pre>
+
+<h3>File 2: <code>kafka/RawTransactionEventListener.java</code></h3>
+<p><strong>Goal:</strong> The central pipeline listener. Consumes raw transactions, filters, sanitizes, and forwards.</p>
+
+<pre><code>package org.example.arp_ecurity_layer.kafka;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.example.arp_ecurity_layer.common.GatewayProcessedEvent;
+import org.example.arp_ecurity_layer.common.GatewayProcessedEventRepository;
+import org.example.arp_ecurity_layer.contracts.KafkaTopics;
+import org.example.arp_ecurity_layer.contracts.SanitizedTransactionEvent;
+import org.example.arp_ecurity_layer.contracts.TransactionCompletedInboundEvent;
+import org.example.arp_ecurity_layer.crypto.HmacClusterHasher;
+import org.example.arp_ecurity_layer.privacy.entity.PrivacyAuditLog;
+import org.example.arp_ecurity_layer.privacy.repository.PrivacyAuditLogRepository;
+import org.example.arp_ecurity_layer.privacy.service.ArpTokenResolverService;
+import org.example.arp_ecurity_layer.privacy.service.DataMinimizer;
+import org.example.arp_ecurity_layer.privacy.service.PiiScrubber;
+import org.springframework.kafka.annotation.BackOff;
+import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.kafka.annotation.RetryableTopic;
+import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
+import tools.jackson.databind.ObjectMapper;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.time.LocalDateTime;
+import java.util.Optional;
+import java.util.UUID;
+
+@Component
+@RequiredArgsConstructor
+@Slf4j
+public class RawTransactionEventListener {
+
+    private final ArpTokenResolverService tokenResolver;
+    private final PiiScrubber piiScrubber;
+    private final DataMinimizer dataMinimizer;
+    private final GatewayKafkaProducer producer;
+    private final GatewayProcessedEventRepository processedEventRepo;
+    private final PrivacyAuditLogRepository auditLogRepo;
+    private final HmacClusterHasher hmacClusterHasher;
+    private final ObjectMapper objectMapper;
+
+    @RetryableTopic(
+            attempts = "4",
+            backOff = @BackOff(delay = 1000, multiplier = 2.0, maxDelay = 10000),
+            autoCreateTopics = "true",
+            exclude = {IllegalArgumentException.class, NullPointerException.class}
+    )
+    @KafkaListener(topics = KafkaTopics.TRANSACTION_COMPLETED, groupId = "${arp.kafka.gateway-group}")
+    @Transactional
+    public void onTransactionCompleted(String payload) {
+        try {
+            // 1. Deserialize
+            TransactionCompletedInboundEvent event = objectMapper.readValue(payload, TransactionCompletedInboundEvent.class);
+
+            // 2. Idempotency Check
+            if (processedEventRepo.existsByEventId(event.getEventId())) {
+                log.info("Event {} already processed, skipping duplicate", event.getEventId());
+                return;
+            }
+
+            // 3. Resolve / Mint ARP Token
+            Optional&lt;String&gt; arpTokenOpt = tokenResolver.getOrCreateActiveToken(event.getCustomerId(), event.getUserId());
+            if (arpTokenOpt.isEmpty()) {
+                log.info("Customer {} opted out of AI analysis, skipping event", event.getCustomerId());
+                markProcessed(event.getEventId(), KafkaTopics.TRANSACTION_COMPLETED);
+                return;
+            }
+            String arpToken = arpTokenOpt.get();
+
+            // 4. Scrub Free-Text Remarks
+            PiiScrubber.ScrubResult scrubResult = piiScrubber.scrubFreeText(event.getRemarks());
+
+            // 5. Coarsen & Minimize Data
+            String timeBucket = dataMinimizer.toTimeBucket(event.getOccurredAt());
+            String amountBand = dataMinimizer.toAmountBand(event.getAmount());
+            var minimizedAmount = dataMinimizer.toMinimizedAmount(event.getAmount(), "BALANCED");
+            String periodKey = dataMinimizer.toPeriodKey(event.getOccurredAt());
+            String clusterHash = hmacClusterHasher.hash(scrubResult.scrubbedText());
+
+            // 6. Assemble Zero-PII Sanitized Event
+            SanitizedTransactionEvent sanitizedEvent = SanitizedTransactionEvent.builder()
+                    .eventId(UUID.randomUUID().toString())
+                    .sourceEventHash(sha256(event.getEventId()))
+                    .arpToken(arpToken)
+                    .privacyMode("BALANCED")
+                    .channel(event.getTransactionType())
+                    .amountBand(amountBand)
+                    .minimizedAmount(minimizedAmount)
+                    .timeBucket(timeBucket)
+                    .periodKey(periodKey)
+                    .sanitizedDescriptor(scrubResult.scrubbedText())
+                    .merchantClusterHash(clusterHash)
+                    .build();
+
+            // 7. Publish to Kafka
+            producer.publishSanitizedTransaction(sanitizedEvent);
+
+            // 8. Record Idempotency & Audit Trail
+            markProcessed(event.getEventId(), KafkaTopics.TRANSACTION_COMPLETED);
+            auditLogRepo.save(PrivacyAuditLog.builder()
+                    .customerId(event.getCustomerId())
+                    .arpToken(arpToken)
+                    .auditAction("SANITIZED_FORWARD")
+                    .fieldsStripped(scrubResult.fieldsStripped().isBlank() ? "IDENTITY_MASKED" : scrubResult.fieldsStripped())
+                    .payloadSha256(sanitizedEvent.getSourceEventHash())
+                    .createdAt(LocalDateTime.now())
+                    .build());
+
+            log.info("Successfully sanitized & forwarded transaction {} for token {}", event.getEventId(), arpToken);
+        } catch (Exception e) {
+            log.error("Failed processing transaction.completed event", e);
+            throw new RuntimeException("Transaction pipeline error", e);
+        }
+    }
+
+    private void markProcessed(String eventId, String topic) {
+        processedEventRepo.save(GatewayProcessedEvent.builder()
+                .eventId(eventId)
+                .topicName(topic)
+                .processedAt(LocalDateTime.now())
+                .build());
+    }
+
+    private String sha256(String input) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(input.getBytes(StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder();
+            for (byte b : hash) {
+                String h = Integer.toHexString(0xff & b);
+                if (h.length() == 1) hex.append('0');
+                hex.append(h);
+            }
+            return hex.toString();
+        } catch (Exception e) {
+            return "HASH_ERROR";
+        }
+    }
+}
+</code></pre>
+
+<h2>4. Verification & Testing Instructions</h2>
+<p>To verify Phase 2 compilation after writing the files:</p>
+<pre><code>cd C:\Users\HEMANT\RESTART\ARP_ecurity_Layer
+.\mvnw.cmd test-compile
+</code></pre>
+
+<div class="box box-concept">
+    <strong>💡 What Happens After Phase 2?</strong><br>
+    Once Phase 2 is in place, transactions from your existing bank monolith (:8080) will flow into Kafka,
+    get scrubbed, and stream into <code>arp.sanitized.transaction</code>.<br>
+    That sets the stage for <strong>Phase 3: The Spring AI Advisor Service (:8083)</strong> to consume those anonymous events and give AI savings advice!
+</div>
+
+</body>
+</html>
