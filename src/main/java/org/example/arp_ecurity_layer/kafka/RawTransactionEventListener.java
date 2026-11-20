@@ -1,6 +1,5 @@
 package org.example.arp_ecurity_layer.kafka;
 
-import tools.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.arp_ecurity_layer.common.GatewayProcessedEvent;
@@ -9,15 +8,23 @@ import org.example.arp_ecurity_layer.contracts.KafkaTopics;
 import org.example.arp_ecurity_layer.contracts.SanitizedTransactionEvent;
 import org.example.arp_ecurity_layer.contracts.TransactionCompletedInboundEvent;
 import org.example.arp_ecurity_layer.crypto.HmacClusterHasher;
+import org.example.arp_ecurity_layer.privacy.entity.PrivacyAuditLog;
+import org.example.arp_ecurity_layer.privacy.repository.PrivacyAuditLogRepository;
 import org.example.arp_ecurity_layer.privacy.service.ArpTokenResolverService;
 import org.example.arp_ecurity_layer.privacy.service.DataMinimizer;
 import org.example.arp_ecurity_layer.privacy.service.PiiScrubber;
 import org.springframework.kafka.annotation.BackOff;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.annotation.RetryableTopic;
-import org.springframework.kafka.retrytopic.TopicSuffixingStrategy;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
+import tools.jackson.databind.ObjectMapper;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.time.LocalDateTime;
+import java.util.Optional;
+import java.util.UUID;
 
 @Component
 @RequiredArgsConstructor
@@ -29,6 +36,7 @@ public class RawTransactionEventListener {
     private final DataMinimizer dataMinimizer;
     private final GatewayKafkaProducer producer;
     private final GatewayProcessedEventRepository processedEventRepo;
+    private final PrivacyAuditLogRepository auditLogRepo;
     private final HmacClusterHasher hmacClusterHasher;
     private final ObjectMapper objectMapper;
 
@@ -41,23 +49,92 @@ public class RawTransactionEventListener {
     @KafkaListener(topics = KafkaTopics.TRANSACTION_COMPLETED, groupId = "${arp.kafka.gateway-group}")
     @Transactional
     public void onTransactionCompleted(String payload) {
-        // TODO: 1. Deserialize payload -> TransactionCompletedInboundEvent using objectMapper
-        // TODO: 2. Idempotency check: if processedEventRepo.existsByEventId(event.getEventId()) -> log & return
-        // TODO: 3. Resolve arpToken: tokenResolver.getOrCreateActiveToken(customerId, userId)
-        // TODO: 4. If arpToken is empty (consent disabled) -> log "Skipping: consent disabled for customer {}" & return
-        // TODO: 5. Scrub PII from remarks: piiScrubber.scrubFreeText(event.getRemarks())
-        // TODO: 6. Get timeBucket: dataMinimizer.toTimeBucket(event.getOccurredAt())
-        // TODO: 7. Get amountBand: dataMinimizer.toAmountBand(event.getAmount())
-        // TODO: 8. Get minimizedAmount: dataMinimizer.toMinimizedAmount(event.getAmount(), privacyMode)
-        // TODO: 9. Get periodKey: dataMinimizer.toPeriodKey(event.getOccurredAt())
-        // TODO: 10. Get merchantClusterHash: hmacClusterHasher.hash(scrubResult.scrubbedText())
-        // TODO: 11. Compute sourceEventHash: SHA-256 of event.getEventId() (non-reversible)
-        // TODO: 12. Build SanitizedTransactionEvent (zero PII - only arpToken, bands, buckets)
-        // TODO: 13. Publish: producer.publishSanitizedTransaction(sanitizedEvent)
-        // TODO: 14. Persist idempotency: GatewayProcessedEvent(eventId, topic, now)
-        // TODO: 15. Persist PrivacyAuditLog (customerId, arpToken, action=SANITIZED_FORWARD, fieldsStripped)
-        // TODO: 16. Log: "Sanitized and forwarded transaction {} for arpToken {}"
-        throw new UnsupportedOperationException("TODO: implement");
+        try {
+            // 1. Deserialize
+            TransactionCompletedInboundEvent event = objectMapper.readValue(payload, TransactionCompletedInboundEvent.class);
+
+            // 2. Idempotency Check
+            if (processedEventRepo.existsByEventId(event.getEventId())) {
+                log.info("Event {} already processed, skipping duplicate", event.getEventId());
+                return;
+            }
+
+            // 3. Resolve / Mint ARP Token
+            Optional<String> arpTokenOpt = tokenResolver.getOrCreateActiveToken(event.getCustomerId(), event.getUserId());
+            if (arpTokenOpt.isEmpty()) {
+                log.info("Customer {} opted out of AI analysis, skipping event", event.getCustomerId());
+                markProcessed(event.getEventId(), KafkaTopics.TRANSACTION_COMPLETED);
+                return;
+            }
+            String arpToken = arpTokenOpt.get();
+
+            // 4. Scrub Free-Text Remarks
+            PiiScrubber.ScrubResult scrubResult = piiScrubber.scrubFreeText(event.getRemarks());
+
+            // 5. Coarsen & Minimize Data
+            String timeBucket = dataMinimizer.toTimeBucket(event.getOccurredAt());
+            String amountBand = dataMinimizer.toAmountBand(event.getAmount());
+            var minimizedAmount = dataMinimizer.toMinimizedAmount(event.getAmount(), "BALANCED");
+            String periodKey = dataMinimizer.toPeriodKey(event.getOccurredAt());
+            String clusterHash = hmacClusterHasher.hash(scrubResult.scrubbedText());
+
+            // 6. Assemble Zero-PII Sanitized Event
+            SanitizedTransactionEvent sanitizedEvent = SanitizedTransactionEvent.builder()
+                    .eventId(UUID.randomUUID().toString())
+                    .sourceEventHash(sha256(event.getEventId()))
+                    .arpToken(arpToken)
+                    .privacyMode("BALANCED")
+                    .channel(event.getTransactionType())
+                    .amountBand(amountBand)
+                    .minimizedAmount(minimizedAmount)
+                    .timeBucket(timeBucket)
+                    .periodKey(periodKey)
+                    .sanitizedDescriptor(scrubResult.scrubbedText())
+                    .merchantClusterHash(clusterHash)
+                    .build();
+
+            // 7. Publish to Kafka
+            producer.publishSanitizedTransaction(sanitizedEvent);
+
+            // 8. Record Idempotency & Audit Trail
+            markProcessed(event.getEventId(), KafkaTopics.TRANSACTION_COMPLETED);
+            auditLogRepo.save(PrivacyAuditLog.builder()
+                    .customerId(event.getCustomerId())
+                    .arpToken(arpToken)
+                    .auditAction("SANITIZED_FORWARD")
+                    .fieldsStripped(scrubResult.fieldsStripped().isBlank() ? "IDENTITY_MASKED" : scrubResult.fieldsStripped())
+                    .payloadSha256(sanitizedEvent.getSourceEventHash())
+                    .createdAt(LocalDateTime.now())
+                    .build());
+
+            log.info("Successfully sanitized & forwarded transaction {} for token {}", event.getEventId(), arpToken);
+        } catch (Exception e) {
+            log.error("Failed processing transaction.completed event", e);
+            throw new RuntimeException("Transaction pipeline error", e);
+        }
+    }
+
+    private void markProcessed(String eventId, String topic) {
+        processedEventRepo.save(GatewayProcessedEvent.builder()
+                .eventId(eventId)
+                .topicName(topic)
+                .processedAt(LocalDateTime.now())
+                .build());
+    }
+
+    private String sha256(String input) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(input.getBytes(StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder();
+            for (byte b : hash) {
+                String h = Integer.toHexString(0xff & b);
+                if (h.length() == 1) hex.append('0');
+                hex.append(h);
+            }
+            return hex.toString();
+        } catch (Exception e) {
+            return "HASH_ERROR";
+        }
     }
 }
-
