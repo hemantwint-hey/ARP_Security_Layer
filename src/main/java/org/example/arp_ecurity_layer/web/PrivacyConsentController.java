@@ -1,17 +1,31 @@
 package org.example.arp_ecurity_layer.web;
 
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.example.arp_ecurity_layer.privacy.entity.ArpIdentityMapping;
+import org.example.arp_ecurity_layer.privacy.repository.ArpIdentityMappingRepository;
 import org.example.arp_ecurity_layer.privacy.service.ArpTokenResolverService;
+import org.example.arp_ecurity_layer.security.JwtUserPrincipal;
+import org.example.arp_ecurity_layer.security.SecurityUtils;
+import org.example.arp_ecurity_layer.web.dto.ConsentRequest;
+import org.example.arp_ecurity_layer.web.dto.ConsentResponse;
+import org.example.arp_ecurity_layer.web.dto.IdentityRotateResponse;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.LocalDateTime;
+
 @RestController
 @RequestMapping("/api/v1/privacy")
 @RequiredArgsConstructor
+@Slf4j
 public class PrivacyConsentController {
 
     private final ArpTokenResolverService tokenResolver;
+    private final ArpIdentityMappingRepository mappingRepo;
+    private final StringRedisTemplate redisTemplate;
 
     /**
      * PUT /api/v1/privacy/consent
@@ -20,14 +34,46 @@ public class PrivacyConsentController {
      * Response: { "arpToken": "R789-...", "privacyMode": "STRICT", "consentEnabled": true }
      */
     @PutMapping("/consent")
-    public ResponseEntity<?> updateConsent(@RequestBody Object consentRequest, Authentication auth) {
-        // TODO: Extract customerId and userId from JWT authentication principal
-        // TODO: Load ArpIdentityMapping for customerId
-        // TODO: Update consentEnabled and privacyMode fields
-        // TODO: Save updated mapping
-        // TODO: Evict Redis cache: arp:map:{customerId}
-        // TODO: Return response with arpToken prefix (first 8 chars only), privacyMode, consentEnabled
-        throw new UnsupportedOperationException("TODO: implement");
+    public ResponseEntity<ConsentResponse> updateConsent(@RequestBody ConsentRequest consentRequest, Authentication auth) {
+        JwtUserPrincipal principal = SecurityUtils.getPrincipal(auth);
+        Long customerId = principal.getCustomerId();
+        String userId = principal.getUserId() != null ? principal.getUserId() : String.valueOf(customerId);
+
+        ArpIdentityMapping mapping = mappingRepo.findByCustomerIdAndStatus(customerId, "ACTIVE")
+                .orElseGet(() -> {
+                    String token = tokenResolver.getOrCreateActiveToken(customerId, userId).orElse("");
+                    return mappingRepo.findByCustomerIdAndStatus(customerId, "ACTIVE")
+                            .orElse(ArpIdentityMapping.builder()
+                                    .customerId(customerId)
+                                    .userId(userId)
+                                    .arpToken(token)
+                                    .status("ACTIVE")
+                                    .expiresAt(LocalDateTime.now().plusDays(90))
+                                    .createdAt(LocalDateTime.now())
+                                    .build());
+                });
+
+        mapping.setConsentEnabled(consentRequest.isConsentEnabled());
+        if (consentRequest.getPrivacyMode() != null && !consentRequest.getPrivacyMode().isBlank()) {
+            mapping.setPrivacyMode(consentRequest.getPrivacyMode().toUpperCase());
+        }
+        mappingRepo.save(mapping);
+
+        // Evict Redis cache: arp:map:{customerId}
+        redisTemplate.delete("arp:map:" + customerId);
+        if (!consentRequest.isConsentEnabled()) {
+            redisTemplate.delete("guard:policy:" + customerId);
+        }
+
+        String tokenPrefix = (mapping.getArpToken() != null && mapping.getArpToken().length() >= 4)
+                ? mapping.getArpToken().substring(0, Math.min(8, mapping.getArpToken().length())) + "..."
+                : null;
+
+        return ResponseEntity.ok(ConsentResponse.builder()
+                .arpToken(tokenPrefix)
+                .privacyMode(mapping.getPrivacyMode())
+                .consentEnabled(mapping.isConsentEnabled())
+                .build());
     }
 
     /**
@@ -36,11 +82,15 @@ public class PrivacyConsentController {
      * Response: { "previousTokenStatus": "ROTATED", "newTokenPrefix": "R412-..." }
      */
     @PostMapping("/identity/rotate")
-    public ResponseEntity<?> rotateIdentity(Authentication auth) {
-        // TODO: Extract customerId from JWT
-        // TODO: Call tokenResolver.rotateToken(customerId)
-        // TODO: Return { previousTokenStatus: "ROTATED", newTokenPrefix: first 8 chars of new token }
-        throw new UnsupportedOperationException("TODO: implement");
+    public ResponseEntity<IdentityRotateResponse> rotateIdentity(Authentication auth) {
+        Long customerId = SecurityUtils.getCustomerId(auth);
+        String newToken = tokenResolver.rotateToken(customerId);
+
+        String prefix = newToken.substring(0, Math.min(8, newToken.length())) + "...";
+        return ResponseEntity.ok(IdentityRotateResponse.builder()
+                .previousTokenStatus("ROTATED")
+                .newTokenPrefix(prefix)
+                .build());
     }
 
     /**
@@ -50,10 +100,8 @@ public class PrivacyConsentController {
      */
     @PostMapping("/identity/revoke")
     public ResponseEntity<Void> revokeIdentity(Authentication auth) {
-        // TODO: Extract customerId from JWT
-        // TODO: Call tokenResolver.revokeAndForget(customerId) — publishes tombstone, evicts Redis
-        // TODO: Return ResponseEntity.noContent().build()
-        throw new UnsupportedOperationException("TODO: implement");
+        Long customerId = SecurityUtils.getCustomerId(auth);
+        tokenResolver.revokeAndForget(customerId);
+        return ResponseEntity.noContent().build();
     }
 }
-
