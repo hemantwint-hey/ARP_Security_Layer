@@ -131,10 +131,7 @@ INTERNAL_AI_SERVICE_URL=http://localhost:8083
 INTERNAL_AI_SERVICE_TOKEN=shared-internal-service-token
 ```
 
-### Run Locally
 
-```bash
-# Build and run tests
 mvn clean verify
 
 # Start the gateway on port 8082 (dev profile)
